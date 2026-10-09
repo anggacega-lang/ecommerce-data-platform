@@ -1,59 +1,31 @@
 # E-commerce Data Platform
 
-An end-to-end local data engineering project that demonstrates **Change Data Capture (CDC), event streaming, stream processing, data lake architecture, and analytical data modeling** using PostgreSQL, Debezium, Apache Kafka, Apache Spark, MinIO, and Delta Lake.
+A local end-to-end data engineering portfolio demonstrating **Change Data Capture (CDC), event streaming, PySpark processing, and a Bronze–Silver–Gold data lake architecture**.
 
-The platform is built and executed locally with Docker and is designed as a practical portfolio project for demonstrating modern data engineering concepts.
+Built with Docker Compose using PostgreSQL, Debezium, Apache Kafka, Apache Spark, MinIO, and Delta Lake.
+
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
+![Apache Kafka](https://img.shields.io/badge/Apache%20Kafka-4.2.0-231F20?logo=apachekafka&logoColor=white)
+![Apache Spark](https://img.shields.io/badge/Apache%20Spark-3.5.7-E25A1C?logo=apachespark&logoColor=white)
+![Delta Lake](https://img.shields.io/badge/Delta%20Lake-Data%20Tables-00A1E0)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
 
 ---
 
 ## Architecture
 
-```text
-                         ┌──────────────────┐
-                         │   PostgreSQL 16  │
-                         │    Source DB     │
-                         └────────┬─────────┘
-                                  │
-                           INSERT / UPDATE
-                              / DELETE
-                                  │
-                                  ▼
-                         ┌──────────────────┐
-                         │     Debezium     │
-                         │    CDC Engine    │
-                         └────────┬─────────┘
-                                  │
-                                  ▼
-                         ┌──────────────────┐
-                         │      Kafka       │
-                         │ Event Streaming  │
-                         └────────┬─────────┘
-                                  │
-                                  ▼
-                         ┌──────────────────┐
-                         │      Spark       │
-                         │    Streaming    │
-                         └────────┬─────────┘
-                                  │
-                                  ▼
-                         ┌──────────────────┐
-                         │      MinIO       │
-                         │  Object Storage  │
-                         └────────┬─────────┘
-                                  │
-                    ┌─────────────┼─────────────┐
-                    ▼             ▼             ▼
-                 Bronze        Silver          Gold
-                    │             │             │
-                    │             │             ▼
-                    │             │       Delta Lake
-                    │             │       order_summary
-                    │             │
-                    └─────────────┴─────────────┘
+```mermaid
+flowchart TD
+    A[(PostgreSQL 16)] -->|CDC changes| B[Debezium 3.6]
+    B --> C[Apache Kafka 4.2.0]
+    C -->|Structured Streaming| D[Apache Spark 3.5.7]
+    D --> E[(MinIO Bronze)]
+    E --> F[(Delta Lake Silver)]
+    F -->|Batch processing| G[Gold Spark Job]
+    G --> H[(Gold order_summary)]
 ```
 
 ---
-
 ## Project Goals
 
 This project demonstrates a practical data platform capable of:
@@ -804,21 +776,14 @@ The documentation covers:
 
 **Angga Cega**
 
-Data Engineer focused on:
+Data engineering portfolio focused on building local data pipelines and exploring:
 
-```text
-Python
-SQL
-Apache Spark
-Apache Kafka
-Apache Airflow
-GCP
-BigQuery
-Data Pipelines
-Data Platforms
-```
+- Python and SQL
+- PySpark and Apache Kafka
+- CDC and data lake architecture
+- GCP and BigQuery
 
----
+GitHub: [@anggacega-lang](https://github.com/anggacega-lang)
 
 ## License
 
