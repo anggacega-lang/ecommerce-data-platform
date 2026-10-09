@@ -657,6 +657,34 @@ gold/order_summary
 
 ---
 
+## Latest Local Validation
+
+The following results were verified in the local Docker environment.
+
+| Dataset | Observed records |
+|---|---:|
+| Silver customers | 6 |
+| Silver products | 5 |
+| Silver inventory | 5 |
+| Silver order items | 8 |
+| Silver orders | 5 |
+| Silver payments | 5 |
+| Gold order summary | 5 |
+
+Validation included reading the Silver and Gold Delta tables from MinIO,
+checking record counts, and verifying that a customer update captured
+through CDC was reflected in Silver and in a subsequent Gold batch run.
+
+### Processing modes
+
+- **Bronze:** Spark Structured Streaming consumes CDC events from Kafka and writes Parquet to MinIO.
+- **Silver:** Spark Structured Streaming processes Bronze data and applies CDC changes to Delta tables.
+- **Gold:** A batch Spark job builds the analytical `order_summary` dataset from Silver data. Rerun the Gold job after Silver changes to refresh the summary.
+
+These results describe a tested local development state, not a production
+scale or performance guarantee. Broader failure recovery, automated data
+quality checks, monitoring, and integration testing remain future work.
+
 # Getting Started
 
 ## 1. Clone the repository

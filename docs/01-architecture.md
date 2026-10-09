@@ -1,786 +1,560 @@
 # E-commerce Data Platform — Architecture
 
-## 1. Architecture Overview
+## 1. Overview
 
-The E-commerce Data Platform is a local data engineering platform designed to demonstrate an end-to-end modern data pipeline.
+This project is a local e-commerce data platform demonstrating an end-to-end pipeline using Change Data Capture (CDC), event streaming, Spark processing, and S3-compatible object storage.
 
-The architecture uses **Change Data Capture (CDC)** to capture transactional changes from PostgreSQL, **Apache Kafka** to stream those changes, **Apache Spark Structured Streaming** to process the events, and **MinIO** as an S3-compatible object storage layer.
-
-Processed data is organized using the **Medallion Architecture**:
+The validated core flow is:
 
 ```text
-Bronze → Silver → Gold
+PostgreSQL → Debezium → Kafka → Spark → MinIO Bronze → Silver → Gold
 ```
 
-The high-level architecture is:
+The current environment runs locally with Docker Compose.
+
+## 2. Technology Stack
+
+| Component | Purpose | Status |
+|---|---|---|
+| PostgreSQL 16 | Transactional source database | Implemented and validated |
+| Debezium | Captures PostgreSQL changes | Implemented and validated |
+| Apache Kafka | CDC event streaming | Implemented and validated |
+| Apache Spark 3.5.7 | Data processing | Implemented and validated |
+| MinIO | S3-compatible object storage | Implemented and validated |
+| Parquet | Bronze storage format | Implemented and validated |
+| Delta Lake | Silver and Gold storage format | Implemented and validated |
+| DuckDB | Analytical query layer | Planned |
+| Metabase | BI and dashboards | Planned |
+
+## 3. Architecture
 
 ```text
-┌──────────────────────┐
-│     PostgreSQL       │
-│   Transactional DB   │
-└──────────┬───────────┘
-           │
-           │ WAL / Logical Replication
-           ▼
-┌──────────────────────┐
-│      Debezium        │
-│   CDC Connector      │
-└──────────┬───────────┘
-           │
-           │ CDC Events
-           ▼
-┌──────────────────────┐
-│        Kafka         │
-│   Event Streaming    │
-└──────────┬───────────┘
-           │
-           │ Kafka Topics
-           ▼
-┌──────────────────────┐
-│        Spark         │
-│ Structured Streaming │
-└──────────┬───────────┘
-           │
-           │ Data Processing
-           ▼
-┌─────────────────────────────────┐
-│             MinIO               │
-│        S3-Compatible Storage     │
-│                                 │
-│   ┌────────┐ ┌────────┐ ┌─────┐│
-│   │ Bronze │ │ Silver │ │Gold ││
-│   └────────┘ └────────┘ └─────┘│
-└────────────────┬────────────────┘
-                 │
-                 ▼
-        ┌─────────────────┐
-        │ Analytics / BI  │
-        │ DuckDB/Metabase │
-        └─────────────────┘
+PostgreSQL
+    |
+    | Logical replication / CDC
+    v
+Debezium
+    |
+    | CDC events
+    v
+Apache Kafka
+    |
+    | CDC events
+    v
+Apache Spark
+    |
+    v
+Bronze
+Parquet
+    |
+    v
+Silver
+Delta Lake
+    |
+    v
+Gold
+Delta Lake
+order_summary
 ```
 
----
+DuckDB, Metabase, Airflow, dbt/Dataform, and automated data quality components are documented as future work unless separately implemented and validated.
 
-## 2. End-to-End Data Flow
+## Architecture Decisions
 
-The complete data flow can be summarized as:
+### Why PostgreSQL?
+
+PostgreSQL provides a realistic transactional source database and supports logical replication for Change Data Capture (CDC).
+
+### Why Debezium?
+
+Debezium captures database changes through CDC without requiring application-level changes to every transaction. It publishes structured change events to Kafka.
+
+### Why Kafka?
+
+Kafka provides a decoupled event streaming layer between the source database and downstream processing. Its topic, partition, and offset model supports event tracking and potential replay while events remain available.
+
+### Why Spark?
+
+Apache Spark provides a processing engine for consuming CDC events and creating Bronze, Silver, and Gold datasets. It also supports both streaming and batch processing patterns.
+
+### Why MinIO?
+
+MinIO provides S3-compatible object storage in the local environment. It allows the project to demonstrate data lake patterns without requiring a cloud storage service.
+
+### Why Medallion Architecture?
+
+The Bronze, Silver, and Gold layers separate raw ingestion, processed data, and analytical datasets. This separation improves clarity and supports independent validation of each processing stage.
+
+### Why Delta Lake?
+
+Delta Lake is used for the Silver and Gold layers to provide a structured table format for analytical datasets. Advanced Delta Lake capabilities are not considered implemented unless separately configured and validated.
+
+## 4. End-to-End Data Flow
+
+The end-to-end processing flow is:
 
 ```text
 PostgreSQL
     │
-    │ INSERT / UPDATE / DELETE
+    │ Logical Replication / CDC
     ▼
 Debezium
     │
-    │ CDC Event
+    │ CDC Events
     ▼
 Kafka
     │
-    │ Topic
+    │ Topic / Partition / Offset
     ▼
 Spark Structured Streaming
     │
-    │ Transform / Process
     ▼
-MinIO
-    │
-    ├── Bronze
-    │
-    ├── Silver
-    │
-    └── Gold
+Bronze
+Parquet
     │
     ▼
-Analytics
+Silver
+Delta Lake
+    │
+    ▼
+Gold
+Delta Lake
+order_summary
 ```
+The current schema contains:
 
-Each component has a specific responsibility.
+- `customers`
+- `products`
+- `orders`
+- `order_items`
+- `payments`
+- `inventory`
 
-| Layer      | Component          | Responsibility                 |
-| ---------- | ------------------ | ------------------------------ |
-| Source     | PostgreSQL         | Transactional source system    |
-| CDC        | Debezium           | Capture database changes       |
-| Streaming  | Kafka              | Transport CDC events           |
-| Processing | Spark              | Transform and process data     |
-| Storage    | MinIO              | Store data lake datasets       |
-| Bronze     | Spark + MinIO      | Raw CDC data                   |
-| Silver     | Spark + MinIO      | Clean and conformed data       |
-| Gold       | Spark + Delta Lake | Business-ready analytical data |
-| Analytics  | DuckDB / Metabase  | Query and visualization        |
+PostgreSQL logical replication is used to support CDC through Debezium. PostgreSQL remains the source of truth, while Bronze, Silver, and Gold are downstream representations.
 
----
+## 6. CDC Layer — Debezium
 
-# 3. Source Layer — PostgreSQL
+Debezium captures changes from PostgreSQL and publishes them to Kafka.
 
-PostgreSQL acts as the transactional source database.
-
-The database contains e-commerce entities such as:
+The configured connector is:
 
 ```text
-customers
-products
-orders
-order_items
-payments
-inventory
+postgres-ecommerce-connector
 ```
 
-The source database is responsible for transactional operations.
+The connector and its task were validated as running.
 
-For example, when a customer record changes:
+The CDC operation field includes:
 
-```sql
-UPDATE customers
-SET city = 'Bandung'
-WHERE customer_id = 4;
-```
+| Operation | Meaning |
+|---|---|
+| `c` | Insert / create |
+| `u` | Update |
+| `d` | Delete |
+| `r` | Snapshot / read event |
 
-the change is committed to PostgreSQL first.
+Depending on the event, the payload can contain `before`, `after`, operation information, timestamps, and source metadata.
 
-The downstream pipeline does not directly query PostgreSQL repeatedly to detect the change. Instead, the change is captured through CDC.
+## 7. Kafka Layer
 
----
+Kafka transports CDC events from Debezium to Spark.
 
-# 4. Change Data Capture — Debezium
-
-Debezium is responsible for capturing changes from PostgreSQL.
-
-The CDC mechanism uses PostgreSQL logical replication to identify database changes.
-
-The flow is:
-
-```text
-PostgreSQL
-     │
-     │ Logical Replication
-     ▼
- Debezium
-     │
-     ▼
- CDC Event
-```
-
-The CDC event contains information about the state of the record before and after the change.
-
-Conceptually:
-
-```json
-{
-  "before": {},
-  "after": {},
-  "op": "u"
-}
-```
-
-The `op` field identifies the type of operation.
-
-| Operation | Meaning         |
-| --------- | --------------- |
-| `c`       | Create / Insert |
-| `u`       | Update          |
-| `d`       | Delete          |
-| `r`       | Read / Snapshot |
-
-For an update:
-
-```text
-before → previous record
-after  → updated record
-op     → u
-```
-
-This information allows downstream processing to understand the actual database change.
-
----
-
-# 5. Kafka — Event Streaming Layer
-
-Apache Kafka acts as the event streaming layer.
-
-Debezium publishes CDC events into Kafka topics.
-
-The topic naming convention follows the e-commerce source structure.
-
-Example:
-
-```text
-ecommerce.public.customers
-ecommerce.public.products
-ecommerce.public.orders
-```
-
-The general structure is:
-
-```text
-<topic-prefix>.<schema>.<table>
-```
-
-For this project:
+The topic naming convention is:
 
 ```text
 ecommerce.public.<table>
 ```
 
-Kafka provides several important capabilities:
+Examples:
 
-* Decoupling source and consumers
-* Durable event storage
-* Partitioned event streams
-* Consumer offsets
-* Scalable event processing
-* Ability to replay events
+```text
+ecommerce.public.customers
+ecommerce.public.products
+ecommerce.public.orders
+ecommerce.public.order_items
+ecommerce.public.payments
+ecommerce.public.inventory
+```
 
----
+Kafka metadata such as topic, partition, offset, and timestamp can be retained by downstream processing jobs for operational investigation.
 
-## 5.1 Kafka Partitions
+The customer topic was validated with three partitions.
 
-Kafka topics are divided into partitions.
+### Topics, Partitions, and Offsets
 
-For example:
+Kafka topics are partitioned logs. Each event is associated with a topic, partition, and offset.
+
+The customer CDC topic was validated with three partitions during local testing.
+
+Conceptually:
 
 ```text
 ecommerce.public.customers
 
-Partition 0
-Partition 1
-Partition 2
+Partition 0 → offset 0, 1, 2, ...
+Partition 1 → offset 0, 1, 2, ...
+Partition 2 → offset 0, 1, 2, ...
 ```
+Partition and offset metadata can be retained by downstream processing to support troubleshooting and investigation of individual CDC events.
 
-Events within a partition maintain their ordering.
+Kafka retention and consumer configuration determine how long previously published events remain available for replay.
 
-Kafka offsets allow consumers such as Spark to track their progress.
+## 8. Spark Processing Layer
 
-Conceptually:
+Apache Spark processes CDC events and writes datasets to MinIO.
+
+The Spark environment uses:
+
+- Spark 3.5.7
+- Hadoop AWS dependencies for S3A access
+- Delta Lake extensions
+- MinIO as the S3-compatible endpoint
+
+Processing jobs are located under:
 
 ```text
-Partition 0
-  offset 0
-  offset 1
-  offset 2
-  ...
-
-Partition 1
-  offset 0
-  offset 1
-  offset 2
-  ...
-
-Partition 2
-  offset 0
-  offset 1
-  ...
+spark/jobs/
 ```
 
-This provides the foundation for reliable stream processing.
+The project contains Bronze ingestion, Silver processing, and Gold aggregation jobs. The execution mode and behavior should be evaluated per job rather than assumed to be identical across the entire project.
 
----
+## 9. MinIO Storage Layer
 
-# 6. Spark Structured Streaming
+MinIO provides S3-compatible object storage.
 
-Apache Spark is responsible for consuming Kafka events and processing the CDC data.
-
-The processing flow is:
+The logical storage areas are:
 
 ```text
-Kafka
-  │
-  ▼
-Spark Structured Streaming
-  │
-  ├── Read Kafka event
-  ├── Parse Debezium payload
-  ├── Extract before / after
-  ├── Identify operation
-  ├── Transform data
-  └── Write to data lake
+s3a://bronze/
+s3a://silver/
+s3a://gold/
 ```
 
-The Spark processing layer is designed to separate event ingestion from analytical transformations.
-
-Important event metadata can include:
+Spark connects to MinIO through the Docker network using:
 
 ```text
-topic
-partition
-offset
-kafka_timestamp
-event_timestamp
-processed_at
-operation
+http://minio:9000
 ```
 
-This metadata is useful for debugging, traceability, and monitoring.
+Credentials are supplied through environment variables and are not intended to be hardcoded in source files.
 
----
+## 10. Medallion Architecture
 
-# 7. Data Lake — MinIO
-
-MinIO provides S3-compatible object storage for the local data platform.
-
-The data lake is logically organized into:
+The platform separates data into three layers:
 
 ```text
-s3://bronze/
-s3://silver/
-s3://gold/
+Bronze → Silver → Gold
 ```
 
-The project uses S3A connectivity from Spark to communicate with MinIO.
+### 10.1 Bronze
 
-Conceptually:
+Bronze stores captured source data in Parquet format.
+
+The Bronze layer is implemented for the following source datasets:
+
+- `customers`
+- `products`
+- `orders`
+- `order_items`
+- `payments`
+- `inventory`
+
+All six datasets have produced Parquet output in the local MinIO Bronze storage area.
+
+Where implemented, event metadata includes:
+
+- CDC payload
+- Operation
+- Topic
+- Partition
+- Offset
+- Kafka timestamp
+- Event timestamp
+- Processing timestamp
+
+A customer CDC test validated the following operation sequence:
 
 ```text
-Spark
-  │
-  │ S3A
-  ▼
-MinIO
+c → u → d
 ```
 
-This allows the local environment to simulate an object-storage-based data lake architecture similar to cloud environments.
+This confirms the tested insert, update, and delete flow for that record. It does not prove that every edge case across every table has been tested.
 
----
+### 10.2 Silver
 
-# 8. Medallion Architecture
+Silver stores processed datasets in Delta Lake format.
 
-The data lake follows the Medallion Architecture.
+The Silver layer is implemented for the following datasets:
+
+- `customers`
+- `products`
+- `orders`
+- `order_items`
+- `payments`
+- `inventory`
+
+The datasets have produced Delta Lake output in the local MinIO Silver storage area.
+
+The tested customer CDC flow resulted in customer record `4` being removed from the Silver output after the delete event.
+
+Claims about comprehensive deduplication, schema evolution, business rules, or complete data quality coverage should only be added after those behaviors are explicitly implemented and tested.
+
+### 10.3 Gold
+
+Gold contains datasets prepared for analytical use cases.
+
+The current validated Gold dataset is:
 
 ```text
-              ┌──────────────┐
-              │    Bronze    │
-              │ Raw CDC Data │
-              └──────┬───────┘
-                     │
-                     ▼
-              ┌──────────────┐
-              │    Silver    │
-              │ Clean Data   │
-              └──────┬───────┘
-                     │
-                     ▼
-              ┌──────────────┐
-              │     Gold     │
-              │ Analytics    │
-              └──────────────┘
+order_summary
 ```
 
-Each layer has a different purpose.
+It is stored in Delta Lake under the Gold storage area.
 
----
-
-# 9. Bronze Layer
-
-The Bronze layer is the first persistent layer after streaming ingestion.
-
-Its primary purpose is to preserve incoming data with minimal transformation.
+The Gold job completed successfully and produced:
 
 ```text
-Kafka
-  │
-  ▼
-Spark
-  │
-  ▼
-Bronze
+Gold records: 5
 ```
 
-Bronze data can retain information such as:
+The Gold output reflects the aggregation logic implemented in:
 
 ```text
-before
-after
-operation
-event_timestamp
-topic
-partition
-offset
-kafka_timestamp
-processed_at
+spark/jobs/gold_order_summary.py
 ```
 
-The Bronze layer is useful for:
+## 11. Delta Lake
 
-* Reprocessing
-* Debugging
-* Auditing
-* CDC investigation
-* Recovering downstream processing
+Delta Lake is used for the Silver and Gold layers.
 
-For example, a CDC event can be traced from Kafka into Bronze using its topic, partition, and offset.
-
----
-
-# 10. Silver Layer
-
-The Silver layer contains cleaned and transformed data.
-
-Typical Silver processing includes:
+The Spark session is configured with:
 
 ```text
-Bronze
-  │
-  ├── Parse CDC payload
-  ├── Normalize schema
-  ├── Convert data types
-  ├── Handle CDC operations
-  ├── Deduplicate records
-  └── Apply business rules
-  │
-  ▼
-Silver
+spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension
+spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog
 ```
 
-The goal is to provide a reliable and consistent dataset for downstream analytical processing.
+Advanced capabilities such as time travel, schema evolution, optimization, and vacuum should not be considered implemented unless they are separately configured and validated.
 
-Silver should contain data that is easier to consume than raw Bronze events.
+## 12. Data Lineage
 
----
-
-# 11. Gold Layer
-
-The Gold layer contains business-oriented analytical datasets.
-
-Gold datasets are designed for analytics, reporting, and BI workloads.
-
-Example:
+The intended lineage path is:
 
 ```text
-gold/order_summary
+PostgreSQL table
+    → Debezium connector
+    → Kafka topic
+    → Spark job
+    → Bronze
+    → Silver
+    → Gold
 ```
 
-The `order_summary` dataset can combine information from multiple entities such as:
-
-```text
-orders
-    +
-order_items
-    +
-customers
-```
-
-resulting in an analytical dataset suitable for reporting.
-
-Conceptually:
-
-```text
-Orders
-   │
-   ├──────────────┐
-   │              │
-Order Items    Customers
-   │              │
-   └──────┬───────┘
-          ▼
-    Order Summary
-          │
-          ▼
-        Gold
-```
-
----
-
-# 12. Delta Lake
-
-The Gold layer uses Delta Lake format for analytical datasets.
-
-Example:
-
-```scala
-spark.read
-  .format("delta")
-  .load("s3a://gold/order_summary")
-```
-
-Delta Lake provides capabilities such as:
-
-* Transactional table management
-* Schema enforcement
-* Reliable reads and writes
-* Data versioning
-* Support for analytical workloads
-
-This makes the Gold layer more robust than storing analytical datasets as unmanaged files alone.
-
----
-
-# 13. Idempotent Processing
-
-An important design principle in this project is idempotent processing.
-
-A pipeline should be safe to rerun without unintentionally creating duplicate records.
-
-Conceptually:
-
-```text
-Input Event
-    │
-    ▼
-Processing
-    │
-    ▼
-Target Dataset
-```
-
-If the same processing operation is executed again:
-
-```text
-Input Event
-    │
-    ▼
-Processing
-    │
-    ▼
-Same Logical Result
-```
-
-This is particularly important for CDC pipelines because events may need to be replayed during development, recovery, or troubleshooting.
-
----
-
-# 14. Data Lineage
-
-The architecture provides a clear lineage path:
-
-```text
-PostgreSQL
-    │
-    ▼
-Debezium
-    │
-    ▼
-Kafka Topic
-    │
-    ▼
-Kafka Partition + Offset
-    │
-    ▼
-Spark
-    │
-    ▼
-Bronze
-    │
-    ▼
-Silver
-    │
-    ▼
-Gold
-```
+Available event metadata can support troubleshooting and lineage investigation.
 
-This allows a downstream record to be traced back toward its source event.
+A complete, independently verified record-level lineage from every Gold record to its original source events has not been established and remains future work.
 
-For example:
+## 13. Validation Summary
 
-```text
-Gold order_summary
-       │
-       ▼
-Silver order data
-       │
-       ▼
-Bronze CDC record
-       │
-       ▼
-Kafka topic / partition / offset
-       │
-       ▼
-PostgreSQL source record
-```
+The following record counts were observed during local validation:
 
----
+| Dataset | Record count |
+|---|---:|
+| `customers` | 6 |
+| `products` | 5 |
+| `orders` | 5 |
+| `order_items` | 8 |
+| `payments` | 5 |
+| `inventory` | 5 |
+| Gold `order_summary` | 5 |
 
-# 15. Reliability Considerations
+These counts represent the validated local state at the time of testing and are not fixed production-volume guarantees.
 
-The architecture is designed around several data engineering principles.
+Validation activities included:
 
-## 15.1 Decoupling
+- Checking Docker container status and health
+- Checking Debezium connector status
+- Verifying Bronze and Silver outputs
+- Checking record counts
+- Testing CDC insert, update, and delete operations
+- Running the Gold processing job
+- Verifying Spark access to MinIO with environment-based credentials
 
-PostgreSQL does not need to communicate directly with every downstream processing component.
+## 14. Reliability Considerations
 
-Kafka provides an intermediary event streaming layer.
+### Idempotent Processing
 
-```text
-PostgreSQL
-    │
-    ▼
- Kafka
-    │
-    ├── Spark
-    ├── Other Consumers
-    └── Future Consumers
-```
+The pipeline is designed to reduce the risk of duplicate effects when processing CDC events.
 
----
+For the validated Silver processing flow, CDC records are interpreted using the Debezium operation type and the resulting state is written to the corresponding dataset.
 
-## 15.2 Replayability
+The customer CDC flow was tested with an insert, update, and delete sequence. The resulting Silver dataset reflected the delete operation.
 
-Kafka retains events according to its configured retention policy.
+This validation demonstrates the expected behavior for the tested scenario, but it does not establish an idempotency guarantee across every processing job or failure scenario.
 
-This allows consumers to replay historical events when necessary.
+### Decoupling
 
-For example:
+Kafka provides a buffer between CDC capture and downstream processing.
 
-```text
-Kafka
-  │
-  ├── Current processing
-  │
-  └── Replay from offset
-```
+Debezium publishes database changes to Kafka topics, while Spark consumes those events independently. This separates the transactional source system from the processing layer and allows the components to operate at different processing rates.
 
-This is useful when debugging or rebuilding downstream datasets.
+This architecture also provides a clear boundary between event capture and data processing, making individual components easier to troubleshoot and evolve.
 
----
+### Replayability
 
-## 15.3 Observability
+Kafka retains CDC events according to its retention configuration. Consumers can use topic, partition, and offset information to identify and process events from a specific position in the stream.
 
-Kafka topic, partition, and offset metadata can be retained during processing.
+This provides an architectural mechanism for replaying previously published events when they are still available in Kafka.
 
-This makes it possible to investigate:
+Automated replay and backfill workflows are not yet implemented as part of the project and require additional testing and operational handling.
 
-```text
-Where did the event come from?
-Which partition contained it?
-Which offset was processed?
-When was it processed?
-```
+### Observability
 
----
+The pipeline retains operational metadata such as Kafka topic, partition, offset, Kafka timestamp, event timestamp, and processing timestamp in the Bronze layer.
 
-# 16. Architecture Decisions
+These fields provide context for tracing CDC events through the processing pipeline and investigating processing behavior.
 
-### Why PostgreSQL?
+The current implementation provides metadata that can support manual troubleshooting. Dedicated monitoring dashboards, automated alerting, and centralized operational metrics are not yet implemented.
 
-PostgreSQL represents a realistic transactional database and provides native logical replication capabilities required for CDC.
+The following areas require additional implementation or testing before the platform can be described as production-ready:
 
-### Why Debezium?
+- Automated retry policies
+- Dead-letter handling
+- Comprehensive data quality checks
+- Schema evolution
+- Automated replay and backfill workflows
+- Monitoring and alerting
+- Automated integration tests
+- Failure recovery across all pipeline stages
+- Broader idempotency testing across processing jobs and failure scenarios
 
-Debezium provides a standard CDC solution that can capture database changes without requiring application-level changes to every transaction.
+The current validation demonstrates that the tested local pipeline works for the documented scenarios. It does not represent a complete production-readiness assessment.
 
-### Why Kafka?
+## 15. Local Deployment
 
-Kafka decouples data producers from consumers and provides durable, partitioned event streams.
-
-### Why Spark?
-
-Spark provides a unified processing engine capable of handling both streaming and batch workloads.
-
-### Why MinIO?
-
-MinIO provides S3-compatible object storage locally, allowing the project to simulate cloud data lake patterns.
-
-### Why Medallion Architecture?
-
-Bronze, Silver, and Gold layers provide clear separation between raw ingestion, data transformation, and business-ready analytical data.
-
-### Why Delta Lake?
-
-Delta Lake provides reliable table management and transactional capabilities for analytical datasets.
-
----
-
-# 17. Local Deployment
-
-All major infrastructure components are deployed locally using Docker Compose.
-
-The primary configuration is:
-
-```text
-docker-compose.yml
-```
-
-The platform can be started with:
-
-```bash
-docker compose up -d
-```
-
-The running containers can be inspected using:
-
-```bash
-docker ps
-```
-
-The project uses a dedicated Docker network:
+The project should be executed from the project root directory:
 
 ```text
 ecommerce-data-platform
 ```
 
-This allows the containers to communicate using their Docker service/container names.
-
----
-
-# 18. Current Architecture Status
-
-The current implementation has successfully established the core pipeline:
+The Docker network is:
 
 ```text
-PostgreSQL
-     ↓
-Debezium
-     ↓
-Kafka
-     ↓
-Spark
-     ↓
-MinIO
-     ↓
-Bronze
-     ↓
-Silver / Gold
+ecommerce-data-platform
 ```
 
-The Gold layer includes a Delta Lake dataset:
+Main services include:
+
+- PostgreSQL
+- Kafka
+- Debezium
+- MinIO
+- Spark
+
+Useful commands:
+
+```bash
+docker ps
+```
+
+```bash
+curl -s http://localhost:8083/connectors/postgres-ecommerce-connector/status
+```
+
+Example Spark execution:
+
+```bash
+docker exec ecommerce-spark sh -c '
+/opt/spark/bin/spark-submit   --master "local[*]"   --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension   --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog   /opt/spark/jobs/gold_order_summary.py
+'
+```
+
+The exact S3A and MinIO configuration should match the configuration used by the current Spark image.
+
+## 16. Security Practices
+
+Sensitive values should be managed through environment variables or a local `.env` file.
+
+Recommended practices:
+
+- Do not hardcode database passwords
+- Do not hardcode MinIO credentials
+- Exclude `.env` from Git
+- Keep placeholders in `.env.example`
+- Rotate credentials if exposed
+- Review repository contents before pushing
+- Remove secrets from Git history if they were committed
+
+Credentials that have been exposed should be treated as compromised and rotated.
+
+## 17. Implementation Status
+
+### Implemented and validated
+
+- PostgreSQL source schema
+- Debezium PostgreSQL connector
+- Kafka CDC topics
+- MinIO storage
+- Spark processing environment
+- Bronze Parquet datasets
+- Silver Delta datasets
+- Gold `order_summary`
+- CDC insert, update, and delete test for a customer record
+- Environment-based MinIO credentials
+
+### Implemented but requiring broader validation
+
+- CDC behavior across all tables
+- Silver processing behavior beyond tested cases
+- Reprocessing and idempotency across all jobs
+- Metadata retention and end-to-end lineage
+- Failure recovery
+
+### Planned
+
+- Automated data quality checks
+- Monitoring and alerting
+- Automated replay and backfill workflows
+- Schema evolution management
+- DuckDB analytical access
+- Metabase dashboards
+- dbt/Dataform models
+- Airflow orchestration
+- Broader integration testing
+- Production deployment patterns
+
+## 18. Future Direction
+
+The planned direction is:
 
 ```text
-s3a://gold/order_summary
+CDC ingestion
+    ↓
+Spark processing
+    ↓
+Bronze / Silver / Gold
+    ↓
+Data quality validation
+    ↓
+Orchestration and monitoring
+    ↓
+Analytical query layer
+    ↓
+BI dashboards
 ```
 
-The architecture will continue to evolve as orchestration, data quality, analytics, and monitoring components are implemented.
+Potential future components include Airflow, dbt/Dataform, DuckDB, Metabase, automated quality checks, and monitoring.
 
----
+These components remain planned until their implementation and operation are validated.
 
-# 19. Future Architecture
+## 19. Design Principles
 
-The planned final architecture will extend the current pipeline with orchestration, quality checks, analytics, and observability.
-
-```text
-                       PostgreSQL
-                           │
-                           ▼
-                       Debezium
-                           │
-                           ▼
-                         Kafka
-                           │
-                           ▼
-                    Spark Streaming
-                           │
-                           ▼
-                         MinIO
-                           │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-           Bronze        Silver        Gold
-                                        │
-                         ┌──────────────┼──────────────┐
-                         ▼              ▼              ▼
-                      DuckDB        Metabase       Analytics
-                         
-             ┌─────────────────────────────────┐
-             │          Airflow                 │
-             │     Workflow Orchestration      │
-             └─────────────────────────────────┘
-
-             ┌─────────────────────────────────┐
-             │       Data Quality              │
-             │ Validation / Completeness       │
-             └─────────────────────────────────┘
-
-             ┌─────────────────────────────────┐
-             │       Monitoring                │
-             │ Metrics / Logs / Alerts         │
-             └─────────────────────────────────┘
-```
-
-This architecture provides a foundation for a complete local modern data platform while keeping individual components replaceable and independently scalable.
+1. Separate transactional and analytical workloads.
+2. Capture source changes through CDC.
+3. Preserve event metadata where possible.
+4. Separate raw, processed, and analytical layers.
+5. Use environment-based configuration for credentials.
+6. Validate implementation claims through actual tests.
+7. Distinguish implemented functionality from planned functionality.
+8. Avoid presenting a local proof of concept as production-ready without additional evidence.
